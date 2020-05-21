@@ -19,6 +19,8 @@ extern crate linked_list_allocator;
 use alloc::vec;
 use linked_list_allocator::LockedHeap;
 
+use typenum::Unsigned;
+
 #[global_allocator]
 static mut ALLOCATOR: LockedHeap = LockedHeap::empty();
 
@@ -27,6 +29,55 @@ static mut ALLOCATOR: LockedHeap = LockedHeap::empty();
 fn allocation_error_handler(_: core::alloc::Layout) -> ! {
     // We just pass our error as a panic.
     panic!("Allocation failure.");
+}
+
+use lazy_static::lazy_static;
+
+lazy_static! {
+    pub static ref PERIPHERALS: Mutex<msp432p401r::Peripherals> = Mutex::new(msp432p401r::Peripherals::take().unwrap());
+}
+
+/// A task to be ran.
+struct Task {
+    function: fn()
+}
+
+impl Task {
+    fn new(function: fn()) -> Task {
+        Task {
+            function
+        }
+    }
+
+    fn run(&self) {
+        (self.function)();
+    }
+}
+
+fn blink<N: Unsigned, M: Unsigned, D: Unsigned>() {
+    for _ in 0..N::to_u16() {
+        cortex_m::interrupt::free(|cs| {
+            let p = PERIPHERALS.borrow(cs);
+    
+            // Get the Digital I/O module
+            let dio = &p.DIO;
+    
+            // Set red LED output to on.
+            dio.paout.modify(|r, w| unsafe { w.p2out().bits(r.p2out().bits() | M::to_u8()) });
+        });
+        asm::delay(D::to_u32() * 100000);
+    
+        cortex_m::interrupt::free(|cs| {
+            let p = PERIPHERALS.borrow(cs);
+    
+            // Get the Digital I/O module
+            let dio = &p.DIO;
+    
+            // Set red LED output to off.
+            dio.paout.modify(|r, w| unsafe { w.p2out().bits(r.p2out().bits() & !M::to_u8()) });
+        });
+        asm::delay(D::to_u32() * 100000);
+    }
 }
 
 #[entry]
@@ -41,12 +92,14 @@ fn main() -> ! {
         ALLOCATOR = LockedHeap::new(start, size);
     }
 
-    let p = Mutex::new(msp432p401r::Peripherals::take().unwrap());
-
-    let task_list = vec![0, 1, 2];
+    let mut task_list = vec![
+        Task::new(blink::<typenum::U5 , typenum::U1, typenum::U6>),
+        Task::new(blink::<typenum::U10, typenum::U2, typenum::U3>),
+        Task::new(blink::<typenum::U15, typenum::U4, typenum::U2>)
+        ];
 
     cortex_m::interrupt::free(|cs| {
-        let p = p.borrow(cs);
+        let p = PERIPHERALS.borrow(cs);
 
         // Get the Watchdog Timer
         let wdt = &p.WDT_A;
@@ -62,37 +115,19 @@ fn main() -> ! {
             w.wdthold().bit(true)
         });
 
-        // The red LED is on port 2 pin 0. Set it to be an output.
-        dio.padir.modify(|r, w| unsafe { w.p2dir().bits(r.p2dir().bits() | 0x01) });
+        // The red LED is on port 2 pin 0.
+        // The green LED is on port 2 pin 1.
+        // The blue LED is on port 2 pin 2.
+        // Set them all up as outputs.
+        dio.padir.modify(|r, w| unsafe { w.p2dir().bits(r.p2dir().bits() | 0x07) });
+
+        // Turn all the LEDs off.
+        dio.paout.modify(|r, w| unsafe { w.p2out().bits(r.p2out().bits() & !7) });
     });
 
     loop {
-        // Will put the processor to sleep until the next interrupt happens.
-        asm::wfi();
+        for task in task_list.iter_mut() {
+            task.run();
+        }
     }
 }
-
-// To use this macro, we had to enable the rt feature in the msp432p401r crate. See the Cargo.toml file for details.
-// #[interrupt]
-// fn PORT1_IRQ() {
-//     static mut STATE: bool = false;
-
-//     *STATE = !*STATE;
-
-//     cortex_m::interrupt::free(|_| {
-//         let p = PERIPHERALS.lock();
-
-//         // Get the Digital I/O module
-//         let dio = &p.DIO;
-
-//         if *STATE {
-//             // Set LED output to on.
-//             dio.paout.modify(|r, w| unsafe { w.p2out().bits(r.p2out().bits() | 1) });
-//         } else {
-//             // Set LED output to off.
-//             dio.paout.modify(|r, w| unsafe { w.p2out().bits(r.p2out().bits() & 0) });
-//         }
-
-//         dio.paifg.write(|w| unsafe { w.p1ifg().bits(0x00) }); // Clear all P1 interrupt flags.
-//     });
-// }
